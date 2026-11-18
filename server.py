@@ -377,6 +377,11 @@ class Atlas:
         for ip, d in devices.items():
             j = d.to_json()
             rec = self.devices.get(ip, {"first_seen": t})
+            # a layer can miss a device on any one scan; keep identity we already learned
+            # (names are keyed by MAC, so losing it would make saved names flicker)
+            for k in ("mac", "vendor", "hostname", "model"):
+                if not j.get(k) and rec.get(k):
+                    j[k] = rec[k]
             rec.update(j)
             rec["last_seen"] = t
             if ip == gateway:

@@ -32,6 +32,8 @@ const G = {
   chip: '<rect x="14" y="14" width="20" height="20" rx="2"/><rect x="19.5" y="19.5" width="9" height="9" opacity=".55"/><path d="M19 14V8M24 14V8M29 14V8M19 34v6M24 34v6M29 34v6M14 19H8M14 24H8M14 29H8M34 19h6M34 24h6M34 29h6"/>',
   beacon: '<circle cx="24" cy="24" r="3"/><path d="M17 17a10 10 0 0 0 0 14M31 17a10 10 0 0 1 0 14M12 12a17 17 0 0 0 0 24M36 12a17 17 0 0 1 0 24"/>',
   unknown: '<circle cx="24" cy="24" r="15" stroke-dasharray="3 3"/><path d="M19.5 19.5a4.5 4.5 0 1 1 6.5 4c-1.3.7-2 1.6-2 3v1"/><circle cx="24" cy="32.5" r=".9"/>',
+  appliance: '<rect x="12" y="4" width="24" height="40" rx="3"/><path d="M12 18h24M17 9v5M17 23v8"/>',
+  charger: '<rect x="10" y="6" width="18" height="30" rx="5"/><path d="M20.5 13l-4 8h5l-4 8"/><path d="M28 28c6 0 8 3 8 7v7"/>',
   globe: '<circle cx="24" cy="24" r="15"/><ellipse cx="24" cy="24" rx="6.5" ry="15"/><path d="M9 24h30M11.5 16h25M11.5 32h25"/>',
 };
 
@@ -188,6 +190,17 @@ export const TYPES = {
         { id: 'battery', kind: 'readout', label: 'Battery', value: '—' },
       ] },
     ] },
+  appliance: { label: 'Appliance', glyph: 'appliance', via: 'SmartThings / LG ThinQ · cloud account',
+    groups: [{ title: 'Appliance', items: [
+      { id: 'status', kind: 'readout', label: 'Status', value: '—' },
+      { id: 'boost', kind: 'toggle', label: 'Power cool / boost', default: false, risk: 'low', onVerb: 'Start boost', offVerb: 'Stop boost' },
+      { id: 'alerts', kind: 'toggle', label: 'Door & fault alerts', default: true, risk: 'low' }] }] },
+  charger: { label: 'EV charger', glyph: 'charger', via: 'Wall Connector local API · read-only; Fleet API to control charging',
+    groups: [{ title: 'Charging', items: [
+      { id: 'charging', kind: 'toggle', label: 'Charging', default: false, onText: 'Charging', offText: 'Idle', onVerb: 'Start charging', offVerb: 'Stop charging', risk: 'low' },
+      { id: 'amps', kind: 'slider', label: 'Current limit', min: 6, max: 48, step: 1, unit: ' A', default: 32, risk: 'low' },
+      { id: 'power', kind: 'readout', label: 'Delivering', value: '— kW' },
+      { id: 'session', kind: 'readout', label: 'This session', value: '— kWh' }] }] },
   watch: { label: 'Watch', glyph: 'watch', via: 'Find My · cloud, no public API', groups: [{ title: 'Find', items: [ringPhone] }] },
   headphones: { label: 'Headphones', glyph: 'headphones', via: 'Find My · cloud, no public API', groups: [{ title: 'Find', items: [ringPhone] }] },
   tag: { label: 'Tracker tag', glyph: 'tag', via: 'Tile / AirTag · cloud, no public API', groups: [{ title: 'Find', items: [ringPhone] }] },
@@ -206,11 +219,19 @@ export const PICKABLE = Object.keys(TYPES).filter((k) => !['external'].includes(
 
 const RULES = [
   [/samsung tv/, 'tv'],
+  [/wall connector|\bwc3\b|_tedapi|ev charger|chargepoint|juicebox|wallbox/, 'charger'],
+  [/^s[0-9a-f]{16}c\b/, 'car'],                                   // Tesla vehicles advertise over BLE as S<16 hex>C
+  [/refrigerator|fridge|family hub|family_hub|washer|dryer|dishwasher|\boven\b|range hood/, 'appliance'],
+  [/govee_h|ihoment_h|\bh6\d{3}\b|\bh7\d{2}[0-9a-z]\b/, 'light'],
+  [/soundlink|\bjbl\b|bose (home|portable|smart)|\bmarshall\b/, 'speaker'],
+  [/smartcam|snh-[a-z0-9]+|tv-ip\d|\bipcam/, 'camera'],
+  [/access point|tew-\d|\bdap\b|unifi/, 'router'],
   [/computer \/ phone/, 'laptop'],
   [/tesla|\bmodel [3sxy]\b|cybertruck/, 'car'],
   [/airpods|buds|headphone|earbud|beats|bose qc|wh-1000/, 'headphones'],
   [/\bwatch\b/, 'watch'],
   [/\btile\b|airtag|smarttag/, 'tag'],
+  [/phone \/ tablet \/ laptop/, 'phone'],                           // the scanner's generic private-MAC guess
   [/ipad|tablet|galaxy tab|kindle/, 'tablet'],
   [/iphone|pixel(?! ?book)|galaxy s|galaxy z|oneplus|\bphone\b/, 'phone'],
   [/macbook|laptop|thinkpad|notebook|\blt-\d|imac|desktop|\bpc\b/, 'laptop'],
@@ -223,9 +244,9 @@ const RULES = [
   [/hue bridge|bridge|smartthings hub|hub\b|thread border/, 'hub'],
   [/bulb|\blight\b|\bwiz\b|lifx|nanoleaf/, 'light'],
   [/plug|outlet|power strip|kasa|tapo|shelly|switch\b/, 'plug'],
-  [/printer|brother|epson|canon|laserjet/, 'printer'],
+  [/printer|brother|epson|canon|laserjet|lexmark/, 'printer'],
   [/vacuum|roborock|roomba|irobot/, 'vacuum'],
-  [/sensor|meter|air quality|netatmo|govee|gvh\d|switchbot|purple ?air|protect/, 'sensor'],
+  [/sensor|meter|air quality|netatmo|gvh\d|switchbot|purple ?air|protect/, 'sensor'],
   [/echo dot|echo studio|echo show|nest mini|nest audio|nest hub|homepod|alexa|\becho\b/, 'assistant'],
   [/sonos|speaker|soundbar|\bbeam\b|\barc\b/, 'speaker'],
   [/apple tv|chromecast|roku|fire ?tv|shield|streamer/, 'streamer'],
@@ -251,12 +272,14 @@ export function typeOf(n) {
 
 // a sharper "how would we talk to it" line when the vendor is known
 const VIA = [
+  [/family hub|refrigerator|fridge/, 'SmartThings · cloud account'],
   [/roku/, 'Roku ECP · local, no account'], [/sonos/, 'Sonos local API · no account'],
   [/chromecast|googlecast|google cast|nest mini|nest audio/, 'Google Cast · local'], [/apple tv|homepod/, 'pyatv · local, one-time pairing'],
   [/samsung/, 'Samsung Tizen WebSocket · local, one-time pairing'], [/kasa|tp-link|tapo/, 'Kasa local protocol · no account'],
   [/hue|signify/, 'Hue bridge API · local, press the link button'], [/\bring\b|ring llc/, 'Ring · cloud account'],
   [/myq|chamberlain/, 'myQ · cloud, closed API'], [/nest/, 'Google Smart Device Management · cloud'],
-  [/tesla/, 'Tesla Fleet API · signed commands'], [/amazon|echo/, 'Alexa · cloud, limited'],
+  [/wall connector|wc3|_tedapi/, 'Wall Connector local API · read-only'], [/tesla/, 'Tesla Fleet API · signed commands'],
+[/lexmark/, 'IPP · local, no account'], [/trendnet|tew-/, 'TRENDnet web admin · local login'], [/amazon|echo/, 'Alexa · cloud, limited'],
   [/aqara|_hap\._tcp|homekit/, 'HomeKit / Matter controller · local'], [/\bwiz\b/, 'WiZ local UDP · no account'],
   [/tuya/, 'Tuya local key · advanced'], [/roborock/, 'Roborock · cloud account'], [/xfinity|technicolor/, 'Xfinity app · no public API'],
 ];

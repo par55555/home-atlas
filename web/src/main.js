@@ -331,7 +331,7 @@ const TYPE_CLUSTER = {
   phone: 'personal', tablet: 'personal', laptop: 'personal', watch: 'personal', headphones: 'personal', tag: 'personal',
   tv: 'entertainment', streamer: 'entertainment', speaker: 'entertainment', assistant: 'assistants',
   camera: 'security', doorbell: 'security', lock: 'security', garage: 'security',
-  thermostat: 'home', light: 'home', plug: 'home', hub: 'home', vacuum: 'home', sensor: 'home', printer: 'home', chip: 'home', car: 'home',
+  thermostat: 'home', light: 'home', plug: 'home', appliance: 'home', charger: 'home', hub: 'home', vacuum: 'home', sensor: 'home', printer: 'home', chip: 'home', car: 'home',
   router: 'core',
 };
 
