@@ -1,0 +1,4 @@
+# Optional: raw ARP sweeps and the live multicast listener.
+# Scapy is GPL-2.0 licensed, so it is kept out of the core install.
+# Without it, ARP falls back to the OS cache and the MULTICAST layer shows as off.
+scapy

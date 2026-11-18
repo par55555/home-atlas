@@ -1,0 +1,20 @@
+# Your real network: IPs, MAC addresses, hostnames. Never commit these.
+atlas_state.json
+atlas_test_report.json
+atlas_devices.json
+atlas_devices.demo.json
+inv.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Front end build inputs (static/app.js is the committed build)
+web/node_modules/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
