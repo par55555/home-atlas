@@ -20,7 +20,23 @@ const ANCHORS = {
   core: [0, 0, 0], entertainment: [165, 70, -30], assistants: [-40, 165, 50], personal: [-175, -10, 70],
   security: [50, -160, -70], home: [140, -70, 135], unknown: [-110, -130, -120], ble: [-200, 90, -120],
 };
-const EXT_RADIUS = 400;     // internet shell
+const RING_R = 440;        // the internet: a tilted ring around the house, one sector per category
+const RING_Q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.36, 0, 0.1));
+const EXT_CATS = [['tracker', 'ADS & TRACKING'], ['platform', 'PLATFORMS'], ['cloud', 'CLOUD'], ['media', 'MEDIA & STREAMING'],
+  ['vendor', 'DEVICE MAKERS'], ['isp', 'ISP'], ['other', 'OTHER']];
+const CAT_WEIGHT = { tracker: 1.4, platform: 1.3, cloud: 0.8, media: 1, vendor: 1, isp: 0.5, other: 1.4 };
+const ringPoint = (a, r, y) => new THREE.Vector3(Math.cos(a) * r, y, Math.sin(a) * r).applyQuaternion(RING_Q);
+// angular sectors for the categories present, trackers centred at the front (+z)
+function layoutRing(cats) {
+  const gap = 0.18, total = cats.reduce((t, c) => t + CAT_WEIGHT[c], 0), span = Math.PI * 2 - gap * cats.length;
+  const out = {}; let a = 0;
+  for (const c of cats) { const w = (span * CAT_WEIGHT[c]) / total; out[c] = [a, a + w]; a += w + gap; }
+  const front = out.tracker || out[cats[0]], shift = Math.PI / 2 - (front[0] + front[1]) / 2;
+  for (const c of cats) out[c] = [out[c][0] + shift, out[c][1] + shift];
+  return out;
+}
+let ring = layoutRing(EXT_CATS.map(([c]) => c));
+const extCat = (n) => (ring[n.category] ? n.category : 'other');
 const HOME_RADIUS = 292;    // the bubble that encloses the house
 const OVERVIEW = { x: 290, y: 175, z: 1000 };
 
@@ -50,9 +66,9 @@ const hash = (s) => { let h = 2166136261; for (const c of s) { h ^= c.charCodeAt
 
 function anchor(n) {
   if (n.kind === 'external') {
-    const u = hash(n.id), v = hash(n.id + '#');
-    const theta = 2 * Math.PI * u, phi = Math.acos(2 * v - 1);
-    return [EXT_RADIUS * Math.sin(phi) * Math.cos(theta), EXT_RADIUS * Math.sin(phi) * Math.sin(theta), EXT_RADIUS * Math.cos(phi)];
+    const [a0, a1] = ring[extCat(n)] || ring.other || Object.values(ring)[0];
+    const a = a0 + (0.08 + 0.84 * hash(n.id)) * (a1 - a0);
+    return ringPoint(a, RING_R + (hash(n.id + 'r') - 0.5) * 70, (hash(n.id + 'y') - 0.5) * 40).toArray();
   }
   return ANCHORS[n.cluster] || ANCHORS.unknown;
 }
@@ -72,6 +88,7 @@ const GLOW = (() => {
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 })();
 const SPHERE = new THREE.SphereGeometry(1, 16, 12);
+const SCALE = { value: (window.innerHeight / 2) * Math.min(2, window.devicePixelRatio || 1) };   // px per world unit at distance 1
 
 function nodeRadius(n) {
   if (n.kind === 'gateway') return 4.6;
@@ -125,14 +142,19 @@ const Graph = new ForceGraph3D(el, { controlType: 'orbit' })
   .warmupTicks(60)
   .cooldownTime(8000);
 
-Graph.d3Force('x', forceX((n) => anchor(n)[0]).strength((n) => (n.kind === 'external' ? 0.09 : 0.14)));
-Graph.d3Force('y', forceY((n) => anchor(n)[1]).strength((n) => (n.kind === 'external' ? 0.09 : 0.14)));
-Graph.d3Force('z', forceZ((n) => anchor(n)[2]).strength((n) => (n.kind === 'external' ? 0.09 : 0.14)));
+// (re)applied whenever the ring's sectors change, since d3 caches each node's target on init
+function applyAnchorForces() {
+  const k = (n) => (n.kind === 'external' ? 0.12 : 0.14);
+  Graph.d3Force('x', forceX((n) => anchor(n)[0]).strength(k));
+  Graph.d3Force('y', forceY((n) => anchor(n)[1]).strength(k));
+  Graph.d3Force('z', forceZ((n) => anchor(n)[2]).strength(k));
+}
+applyAnchorForces();
 Graph.d3Force('charge').strength(-34).distanceMax(220);
 Graph.d3Force('link').distance((l) => (l.kind === 'flow' ? 190 : l.kind === 'lan' ? 110 : 70)).strength((l) => (l.kind === 'flow' ? 0.004 : l.kind === 'lan' ? 0.01 : 0.03));
 
 // bloom: the soft "lit from within" look
-const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.45, 0.32);
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.12, 0.36);   // tight radius: glow on the points, no fog over the house
 Graph.postProcessingComposer().addPass(bloom);
 Graph.postProcessingComposer().addPass(new OutputPass());
 Graph.scene().background = new THREE.Color('#141416');   // opaque bg so bloom doesn't haze the canvas   // keeps the near-black background (color-space correct)
@@ -152,25 +174,25 @@ const dust = (() => {
 // the home bubble: a thin glowing membrane around everything inside the house
 const bubble = (() => {
   const group = new THREE.Group();
+  // the membrane is drawn as its outline only: a camera-facing disc placed exactly on the sphere's
+  // silhouette, glowing just inside the edge and fully clear in the middle (see updateBubble)
   const mat = new THREE.ShaderMaterial({
     uniforms: { uTime: { value: 0 } },
-    vertexShader: `varying vec3 vN; varying vec3 vV; varying vec3 vP;
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv * 2.0 - 1.0; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float uTime; varying vec2 vUv;
       void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vP = position; vN = normalize(mat3(modelMatrix) * normal); vV = normalize(cameraPosition - wp.xyz);
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }`,
-    fragmentShader: `uniform float uTime; varying vec3 vN; varying vec3 vV; varying vec3 vP;
-      void main() {
-        float f = 1.0 - abs(dot(normalize(vN), normalize(vV)));
-        float rim = pow(f, 4.2);
-        float sh = 0.5 + 0.5 * sin(vP.y * 0.03 + uTime * 0.35) * sin(vP.x * 0.024 - uTime * 0.27 + vP.z * 0.01);
+        float d = length(vUv) * 1.04;                        // 1.0 = the silhouette
+        float inner = pow(clamp((d - 0.8) / 0.2, 0.0, 1.0), 3.0);
+        float outer = 1.0 - smoothstep(1.0, 1.012, d);
+        float a = atan(vUv.y, vUv.x);
+        float sh = 0.5 + 0.5 * sin(a * 3.0 + uTime * 0.25) * sin(a * 5.0 - uTime * 0.18);
         vec3 col = mix(vec3(0.50, 0.60, 0.80), vec3(0.86, 0.76, 0.58), sh);
-        gl_FragColor = vec4(col, rim * 0.16);
+        gl_FragColor = vec4(col, inner * outer * 0.2);
       }`,
-    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   });
-  group.add(new THREE.Mesh(new THREE.SphereGeometry(HOME_RADIUS, 96, 64), mat));
+  const rim = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+  group.add(rim); group.__rim = rim;
   // faint specks sitting on the membrane give it surface
   const N = 1400, pos = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) {
@@ -178,38 +200,125 @@ const bubble = (() => {
     pos[i * 3] = r * Math.sin(ph) * Math.cos(th); pos[i * 3 + 1] = r * Math.sin(ph) * Math.sin(th); pos[i * 3 + 2] = r * Math.cos(ph);
   }
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  group.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0xb9c3d6, size: 0.9, transparent: true, opacity: 0.28, depthWrite: false })));
+  // specks only on the hemisphere facing the camera, so the far side never hazes what is behind it
+  group.add(new THREE.Points(g, new THREE.ShaderMaterial({
+    uniforms: { uScale: SCALE },
+    vertexShader: `varying float vA; uniform float uScale;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vA = smoothstep(0.0, 0.35, dot(normalize(wp.xyz), normalize(cameraPosition - wp.xyz)));
+        vec4 mv = viewMatrix * wp; gl_PointSize = max(1.0, 1.1 * uScale / -mv.z); gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `varying float vA; void main() { gl_FragColor = vec4(0.72, 0.76, 0.84, 0.3 * vA); }`,
+    transparent: true, depthWrite: false,
+  })));
   group.__mat = mat;
   Graph.scene().add(group); return group;
 })();
 
-// space nebula: soft clumped haze in the shell outside the bubble, where the internet lives
+// space nebula: cool haze beyond the internet ring. Puffs that sit between the camera and the
+// house fade out, so it always reads as a backdrop and never covers the ring.
+const NEB_MAT = (size, opacity, fade) => new THREE.ShaderMaterial({
+  uniforms: { uMap: { value: GLOW }, uScale: SCALE, uSize: { value: size }, uOpacity: { value: opacity }, uFade: { value: fade } },
+  vertexShader: `attribute vec3 aColor; varying vec3 vC; varying float vA; uniform float uScale, uSize, uFade;
+    void main() {
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      float facing = dot(normalize(wp.xyz), normalize(cameraPosition));
+      vA = mix(1.0, 1.0 - smoothstep(-0.15, 0.5, facing), uFade); vC = aColor;
+      vec4 mv = viewMatrix * wp; gl_PointSize = uSize * uScale / -mv.z; gl_Position = projectionMatrix * mv;
+    }`,
+  fragmentShader: `uniform sampler2D uMap; uniform float uOpacity; varying vec3 vC; varying float vA;
+    void main() { vec4 t = texture2D(uMap, gl_PointCoord); gl_FragColor = vec4(vC * t.rgb, t.a * vA * uOpacity); }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
 const nebula = (() => {
   const group = new THREE.Group();
-  const tints = [[0.42, 0.50, 0.72], [0.56, 0.46, 0.70], [0.72, 0.64, 0.46], [0.40, 0.58, 0.62]].map((c) => new THREE.Color(...c));
+  const tints = [[0.42, 0.50, 0.72], [0.52, 0.44, 0.72], [0.36, 0.56, 0.66], [0.46, 0.48, 0.62]].map((c) => new THREE.Color(...c));
   const seeds = Array.from({ length: 18 }, () => {
     const th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
     return { dir: new THREE.Vector3(Math.sin(ph) * Math.cos(th), Math.sin(ph) * Math.sin(th), Math.cos(ph)), tint: tints[Math.floor(Math.random() * tints.length)] };
   });
   const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
-  const layer = (n, size, opacity, spread) => {
+  const layer = (n, size, opacity, spread, fade = 1) => {
     const pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {
       const s = seeds[i % seeds.length];
       const d = s.dir.clone().add(new THREE.Vector3(gauss(), gauss(), gauss()).multiplyScalar(spread)).normalize();
-      const r = HOME_RADIUS + 40 + Math.pow(Math.random(), 0.8) * 230;
+      const r = RING_R + 110 + Math.pow(Math.random(), 0.8) * 260;
       pos.set([d.x * r, d.y * r, d.z * r], i * 3);
       const c = s.tint.clone().lerp(tints[i % tints.length], 0.25); col.set([c.r, c.g, c.b], i * 3);
     }
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    group.add(new THREE.Points(g, new THREE.PointsMaterial({ map: GLOW, size, vertexColors: true, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending })));
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    group.add(new THREE.Points(g, NEB_MAT(size, opacity, fade)));
   };
-  layer(320, 150, 0.05, 0.35);
-  layer(700, 55, 0.07, 0.22);
-  layer(1600, 4, 0.5, 0.5);     // pinprick stars mixed into the haze
+  layer(260, 105, 0.055, 0.35);
+  layer(650, 45, 0.075, 0.22);
+  layer(1600, 3.5, 0.5, 0.5, 0.4);     // pinprick stars mixed into the haze
   Graph.scene().add(group); return group;
 })();
+
+// keep the outline on the silhouette: for a camera at distance D the visible edge of a sphere of
+// radius R is a circle of radius R*sqrt(1-(R/D)^2), centred R^2/D toward the camera
+function updateBubble() {
+  const cam = Graph.camera().position, D = cam.length(), R = HOME_RADIUS, rim = bubble.__rim;
+  rim.visible = D > R * 1.02;                       // from inside the house there is no outline to draw
+  if (!rim.visible) return;
+  const dir = cam.clone().normalize();
+  rim.position.copy(dir.multiplyScalar((R * R) / D));
+  rim.quaternion.copy(Graph.camera().quaternion);
+  rim.scale.setScalar(R * Math.sqrt(1 - (R / D) ** 2) * 1.04);
+}
+
+// faint arcs tracing each category's sector of the ring
+const ringGuide = new THREE.Group();
+Graph.scene().add(ringGuide);
+function drawRingGuide() {
+  ringGuide.children.forEach((c) => { c.geometry.dispose(); c.material.dispose(); });
+  ringGuide.clear();
+  for (const [cat, [a0, a1]] of Object.entries(ring)) {
+    const pts = Array.from({ length: 49 }, (_, i) => ringPoint(a0 + ((a1 - a0) * i) / 48, RING_R, 0));
+    ringGuide.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: cat === 'tracker' ? TRACKER : COLORS.internet, transparent: true, opacity: 0.16, depthWrite: false })));
+  }
+}
+drawRingGuide();
+
+// exit points: a glow wherever a connection pierces the bubble on its way out of the house
+const PORTAL_MAX = 800;
+const portals = (() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PORTAL_MAX * 3), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(PORTAL_MAX * 3), 3));
+  g.setDrawRange(0, 0);
+  const p = new THREE.Points(g, new THREE.PointsMaterial({ map: GLOW, size: 16, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  p.frustumCulled = false;
+  Graph.scene().add(p); return p;
+})();
+const _tint = new THREE.Color();
+function updatePortals() {
+  const g = portals.geometry, pos = g.attributes.position.array, col = g.attributes.color.array, R2 = HOME_RADIUS * HOME_RADIUS;
+  let k = 0;
+  for (const l of Graph.graphData().links) {
+    if (k >= PORTAL_MAX) break;
+    if (l.kind !== 'flow' || typeof l.source !== 'object' || l.source.x == null || l.target.x == null || !linkVisible(l)) continue;
+    const s = l.source, t = l.target, dx = t.x - s.x, dy = t.y - s.y, dz = t.z - s.z;
+    const a = dx * dx + dy * dy + dz * dz, b = 2 * (s.x * dx + s.y * dy + s.z * dz), c = s.x * s.x + s.y * s.y + s.z * s.z - R2;
+    if (c >= 0 || !a) continue;                 // source already outside the bubble
+    const u = (-b + Math.sqrt(b * b - 4 * a * c)) / (2 * a);
+    if (u < 0 || u > 1) continue;               // destination still inside
+    let w = 0.7 + 1.1 * chat(l);
+    if (state.focus) w = idOf(l.source) === state.focus || idOf(l.target) === state.focus ? 2 : 0.08;
+    if (state.query && !matchesLink(l)) w *= 0.1;
+    _tint.set(linkTint(l)).multiplyScalar(w);
+    pos[k * 3] = s.x + u * dx; pos[k * 3 + 1] = s.y + u * dy; pos[k * 3 + 2] = s.z + u * dz;
+    col[k * 3] = _tint.r; col[k * 3 + 1] = _tint.g; col[k * 3 + 2] = _tint.b;
+    k++;
+  }
+  g.setDrawRange(0, k); g.attributes.position.needsUpdate = true; g.attributes.color.needsUpdate = true;
+  portals.material.size = 15 + Math.sin(performance.now() / 650) * 2.5;
+  portals.visible = state.showExternal;
+}
 
 const controls = Graph.controls();
 controls.autoRotate = true; controls.autoRotateSpeed = 0.35; controls.enableDamping = true;
@@ -217,7 +326,10 @@ controls.addEventListener('start', () => { controls.autoRotate = false; state.id
 controls.addEventListener('end', () => { state.idleSince = performance.now(); });
 Graph.cameraPosition(OVERVIEW);
 
-window.addEventListener('resize', () => { Graph.width(window.innerWidth).height(window.innerHeight); bloom.setSize(window.innerWidth, window.innerHeight); });
+window.addEventListener('resize', () => {
+  Graph.width(window.innerWidth).height(window.innerHeight); bloom.setSize(window.innerWidth, window.innerHeight);
+  SCALE.value = (window.innerHeight / 2) * Math.min(2, window.devicePixelRatio || 1);
+});
 
 // ------------------------------------------------------------------------------------
 // Visibility, chattiness, styling
@@ -750,7 +862,7 @@ function renderFilters() {
     if (k === '__ext') state.showExternal = !state.showExternal;
     else state.enabled.has(k) ? state.enabled.delete(k) : state.enabled.add(k);
     Graph.nodeVisibility(Graph.nodeVisibility()).linkVisibility(Graph.linkVisibility());
-    nebula.visible = state.showExternal;
+    nebula.visible = ringGuide.visible = state.showExternal;
     renderFilters(); renderDevices();
   }));
 }
@@ -768,7 +880,30 @@ function updateLabels() {
     groups.set(n.cluster, g);
   }
   const cam = Graph.camera();
+  const W = window.innerWidth - (panel.classList.contains('open') ? 400 : 0);
+  const L = devicesEl.classList.contains('collapsed') ? 20 : 300;
+  const place = (div, p, txt) => {
+    if (p.clone().project(cam).z > 1) { div.style.opacity = 0; return; }
+    const { x, y } = Graph.graph2ScreenCoords(p.x, p.y, p.z);
+    if (y < 110 || y > window.innerHeight - 90 || x < L + 70 || x > W - 70) { div.style.opacity = 0; return; }
+    div.style.left = `${x}px`; div.style.top = `${y}px`;
+    div.style.opacity = state.focus ? 0.25 : 1;
+    if (div.__txt !== txt) { div.innerHTML = txt; div.__txt = txt; }
+  };
+  // the internet ring: one label per category sector, just outside the ring
+  const extCount = {};
+  for (const n of nodes) if (n.kind === 'external' && nodeVisible(n)) extCount[extCat(n)] = (extCount[extCat(n)] || 0) + 1;
+  for (const [cat, title] of EXT_CATS) {
+    const id = 'ext:' + cat;
+    let div = labelDivs.get(id);
+    if (!div) { div = document.createElement('div'); div.className = 'clabel ext' + (cat === 'tracker' ? ' tracker' : ''); labelsEl.appendChild(div); labelDivs.set(id, div); }
+    if (!ring[cat] || !extCount[cat]) { div.style.opacity = 0; continue; }
+    const mid = (ring[cat][0] + ring[cat][1]) / 2, at = ringPoint(mid, RING_R + 25, 0).add(new THREE.Vector3(0, 30, 0));   // on the ring, lifted a little
+    if (at.clone().normalize().dot(cam.position.clone().normalize()) < -0.2) { div.style.opacity = 0; continue; }   // sector is behind the house
+    place(div, at, `<div class="t">${esc(title)}</div><div class="s">INTERNET<span class="c">${extCount[cat]}</span></div>`);
+  }
   for (const c of state.clusters) {
+    if (c.id === 'internet') continue;
     let div = labelDivs.get(c.id);
     if (!div) {
       div = document.createElement('div'); div.className = 'clabel' + (c.id === 'unknown' ? ' unknown' : '');
@@ -776,17 +911,7 @@ function updateLabels() {
     }
     const g = groups.get(c.id);
     if (!g || !g.c) { div.style.opacity = 0; continue; }
-    const p = c.id === 'internet' ? new THREE.Vector3(0, EXT_RADIUS * 1.12, 0) : new THREE.Vector3(g.x / g.c, g.y / g.c, g.z / g.c);
-    const v = p.clone().project(cam);
-    if (v.z > 1) { div.style.opacity = 0; continue; }
-    const { x, y } = Graph.graph2ScreenCoords(p.x, p.y, p.z);
-    const W = window.innerWidth - (panel.classList.contains('open') ? 400 : 0);
-    const L = devicesEl.classList.contains('collapsed') ? 20 : 300;
-    if (y < 110 || y > window.innerHeight - 90 || x < L + 70 || x > W - 70) { div.style.opacity = 0; continue; }
-    div.style.left = `${x}px`; div.style.top = `${y}px`;
-    div.style.opacity = state.focus ? 0.25 : 1;
-    const txt = `<div class="t">${esc(c.title)}</div><div class="s">${esc(c.subtitle)}<span class="c">${g.c}</span></div>`;
-    if (div.__txt !== txt) { div.innerHTML = txt; div.__txt = txt; }
+    place(div, new THREE.Vector3(g.x / g.c, g.y / g.c, g.z / g.c), `<div class="t">${esc(c.title)}</div><div class="s">${esc(c.subtitle)}<span class="c">${g.c}</span></div>`);
   }
 }
 
@@ -811,6 +936,12 @@ const subtitle = document.getElementById('subtitle'), statusEl = document.getEle
 function applyGraph(data) {
   document.getElementById('boot').style.display = 'none';
   state.meta = data.meta || {}; state.clusters = data.clusters || []; state.lastUpdate = Date.now();
+  const cats = EXT_CATS.map(([c]) => c).filter((c) => data.nodes.some((n) => n.kind === 'external' && (EXT_CATS.some(([k]) => k === n.category) ? n.category : 'other') === c));
+  const sig = cats.join();
+  if (cats.length && sig !== state.ringSig) {
+    state.ringSig = sig; ring = layoutRing(cats);
+    applyAnchorForces(); drawRingGuide(); Graph.d3ReheatSimulation();
+  }
   const old = new Map(Graph.graphData().nodes.map((n) => [n.id, n]));
   const oldLinks = new Map(Graph.graphData().links.map((l) => [l.id, l]));
 
@@ -895,7 +1026,7 @@ async function boot() {
   nebula.rotation.y -= 0.00012; nebula.rotation.z += 0.00004;
   bubble.__mat.uniforms.uTime.value = performance.now() / 1000;
   if (!controls.autoRotate && !state.focus && performance.now() - state.idleSince > 20000) controls.autoRotate = true;
-  updateLabels(); updateGizmo(); updateDeco();
+  updateBubble(); updateLabels(); updateGizmo(); updateDeco(); updatePortals();
   requestAnimationFrame(frame);
 })();
 
@@ -905,5 +1036,5 @@ initControl({
   refreshPanel: (id) => { if (state.focus && (!id || id === state.focus) && byId.has(state.focus)) renderPanel(byId.get(state.focus)); },
 });
 
-window.__atlas = { Graph, state, byId, statusOf, privacyOf, typeOf };
+window.__atlas = { Graph, state, byId, statusOf, privacyOf, typeOf, bubble, nebula, portals, dust, bloom };
 boot();
